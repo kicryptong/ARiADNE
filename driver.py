@@ -6,6 +6,9 @@ import ray
 import os
 import numpy as np
 import random
+import matplotlib.pyplot as plt
+import json
+from datetime import datetime
 
 from model import PolicyNet, QNet
 from runner import RLRunner
@@ -19,6 +22,121 @@ if not os.path.exists(model_path):
     os.makedirs(model_path)
 if not os.path.exists(gifs_path):
     os.makedirs(gifs_path)
+
+# 성능 모니터링을 위한 폴더 생성
+performance_path = f'performance/{FOLDER_NAME}'
+if not os.path.exists(performance_path):
+    os.makedirs(performance_path)
+
+# 1000회마다 모델 저장을 위한 폴더 생성
+milestone_model_path = f'milestone_models/{FOLDER_NAME}'
+if not os.path.exists(milestone_model_path):
+    os.makedirs(milestone_model_path)
+
+
+def save_milestone_model(models_dict, episode, performance_metrics):
+    """1000회마다 모델을 별도로 저장"""
+    milestone_path = f"{milestone_model_path}/model_episode_{episode}"
+    if not os.path.exists(milestone_path):
+        os.makedirs(milestone_path)
+    
+    # 모델 저장
+    torch.save(models_dict, f"{milestone_path}/checkpoint.pth")
+    
+    # 성능 메트릭도 함께 저장
+    with open(f"{milestone_path}/performance_summary.json", 'w') as f:
+        json.dump(performance_metrics, f, indent=4)
+    
+    print(f"Milestone model saved at episode {episode}")
+
+
+def plot_performance_metrics(performance_history, episode):
+    """성능 메트릭 시각화"""
+    if len(performance_history['episodes']) < 2:
+        return
+    
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle(f'Training Performance - Episode {episode}', fontsize=16)
+    
+    episodes = performance_history['episodes']
+    
+    # 1. Reward 그래프
+    axes[0, 0].plot(episodes, performance_history['rewards'], 'b-', alpha=0.7)
+    axes[0, 0].plot(episodes, performance_history['reward_ma'], 'r-', linewidth=2, label='Moving Average')
+    axes[0, 0].set_title('Average Reward')
+    axes[0, 0].set_xlabel('Episode')
+    axes[0, 0].set_ylabel('Reward')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # 2. Success Rate 그래프
+    axes[0, 1].plot(episodes, performance_history['success_rates'], 'g-', alpha=0.7)
+    axes[0, 1].plot(episodes, performance_history['success_rate_ma'], 'r-', linewidth=2, label='Moving Average')
+    axes[0, 1].set_title('Success Rate')
+    axes[0, 1].set_xlabel('Episode')
+    axes[0, 1].set_ylabel('Success Rate')
+    axes[0, 1].set_ylim(0, 1)
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # 3. Explored Rate 그래프
+    axes[0, 2].plot(episodes, performance_history['explored_rates'], 'm-', alpha=0.7)
+    axes[0, 2].plot(episodes, performance_history['explored_rate_ma'], 'r-', linewidth=2, label='Moving Average')
+    axes[0, 2].set_title('Explored Rate')
+    axes[0, 2].set_xlabel('Episode')
+    axes[0, 2].set_ylabel('Explored Rate')
+    axes[0, 2].set_ylim(0, 1)
+    axes[0, 2].legend()
+    axes[0, 2].grid(True, alpha=0.3)
+    
+    # 4. Travel Distance 그래프
+    axes[1, 0].plot(episodes, performance_history['travel_distances'], 'c-', alpha=0.7)
+    axes[1, 0].plot(episodes, performance_history['travel_dist_ma'], 'r-', linewidth=2, label='Moving Average')
+    axes[1, 0].set_title('Travel Distance')
+    axes[1, 0].set_xlabel('Episode')
+    axes[1, 0].set_ylabel('Distance')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # 5. Loss 그래프
+    if len(performance_history['policy_losses']) > 0:
+        axes[1, 1].plot(episodes[-len(performance_history['policy_losses']):], 
+                       performance_history['policy_losses'], 'orange', alpha=0.7, label='Policy Loss')
+        axes[1, 1].plot(episodes[-len(performance_history['q_losses']):], 
+                       performance_history['q_losses'], 'purple', alpha=0.7, label='Q Loss')
+        axes[1, 1].set_title('Training Losses')
+        axes[1, 1].set_xlabel('Episode')
+        axes[1, 1].set_ylabel('Loss')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+        axes[1, 1].set_yscale('log')
+    
+    # 6. Entropy 그래프
+    if len(performance_history['entropies']) > 0:
+        axes[1, 2].plot(episodes[-len(performance_history['entropies']):], 
+                       performance_history['entropies'], 'brown', alpha=0.7)
+        axes[1, 2].set_title('Policy Entropy')
+        axes[1, 2].set_xlabel('Episode')
+        axes[1, 2].set_ylabel('Entropy')
+        axes[1, 2].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f'{performance_path}/performance_episode_{episode}.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+
+def calculate_moving_average(data, window=100):
+    """이동평균 계산"""
+    if len(data) < window:
+        return [np.mean(data[:i+1]) for i in range(len(data))]
+    else:
+        ma = []
+        for i in range(len(data)):
+            if i < window:
+                ma.append(np.mean(data[:i+1]))
+            else:
+                ma.append(np.mean(data[i-window+1:i+1]))
+        return ma
 
 
 def main():
@@ -47,6 +165,22 @@ def main():
 
     curr_episode = 0
     target_q_update_counter = 1
+
+    # 성능 모니터링을 위한 변수들
+    performance_history = {
+        'episodes': [],
+        'rewards': [],
+        'reward_ma': [],
+        'success_rates': [],
+        'success_rate_ma': [],
+        'explored_rates': [],
+        'explored_rate_ma': [],
+        'travel_distances': [],
+        'travel_dist_ma': [],
+        'policy_losses': [],
+        'q_losses': [],
+        'entropies': []
+    }
 
     # load model and optimizer trained before
     if LOAD_MODEL:
@@ -228,7 +362,6 @@ def main():
                     log_alpha_optimizer.step()
 
                     target_q_update_counter += 1
-                    # print("target q update counter", target_q_update_counter % 1024)
 
                 # data record to be written in tensorboard
                 perf_data = []
@@ -239,9 +372,27 @@ def main():
                         alpha_loss.item(), *perf_data]
                 training_data.append(data)
 
-            # write record to tensorboard
+            # write record to tensorboard and update performance history
             if len(training_data) >= SUMMARY_WINDOW:
                 write_to_tensor_board(writer, training_data, curr_episode)
+                
+                # 성능 기록 업데이트
+                avg_data = np.nanmean(training_data, axis=0)
+                performance_history['episodes'].append(curr_episode)
+                performance_history['rewards'].append(avg_data[0])
+                performance_history['success_rates'].append(avg_data[-2])
+                performance_history['explored_rates'].append(avg_data[-1])
+                performance_history['travel_distances'].append(avg_data[-3])
+                performance_history['policy_losses'].append(avg_data[2])
+                performance_history['q_losses'].append(avg_data[3])
+                performance_history['entropies'].append(avg_data[4])
+                
+                # 이동평균 계산
+                performance_history['reward_ma'] = calculate_moving_average(performance_history['rewards'])
+                performance_history['success_rate_ma'] = calculate_moving_average(performance_history['success_rates'])
+                performance_history['explored_rate_ma'] = calculate_moving_average(performance_history['explored_rates'])
+                performance_history['travel_dist_ma'] = calculate_moving_average(performance_history['travel_distances'])
+                
                 training_data = []
                 perf_metrics = {}
                 for n in metric_name:
@@ -265,7 +416,42 @@ def main():
                 global_target_q_net1.eval()
                 global_target_q_net2.eval()
 
-            # save the model
+            # 1000회마다 마일스톤 모델 저장
+            if curr_episode % 1000 == 0:
+                checkpoint_data = {
+                    "policy_model": global_policy_net.state_dict(),
+                    "q_net1_model": global_q_net1.state_dict(),
+                    "q_net2_model": global_q_net2.state_dict(),
+                    "log_alpha": log_alpha,
+                    "policy_optimizer": global_policy_optimizer.state_dict(),
+                    "q_net1_optimizer": global_q_net1_optimizer.state_dict(),
+                    "q_net2_optimizer": global_q_net2_optimizer.state_dict(),
+                    "log_alpha_optimizer": log_alpha_optimizer.state_dict(),
+                    "episode": curr_episode,
+                }
+                
+                # 성능 요약 정보
+                recent_performance = {}
+                if len(performance_history['episodes']) > 0:
+                    recent_performance = {
+                        'latest_episode': curr_episode,
+                        'avg_success_rate_last_100': np.mean(performance_history['success_rates'][-100:]) if len(performance_history['success_rates']) >= 100 else np.mean(performance_history['success_rates']),
+                        'avg_explored_rate_last_100': np.mean(performance_history['explored_rates'][-100:]) if len(performance_history['explored_rates']) >= 100 else np.mean(performance_history['explored_rates']),
+                        'avg_reward_last_100': np.mean(performance_history['rewards'][-100:]) if len(performance_history['rewards']) >= 100 else np.mean(performance_history['rewards']),
+                        'timestamp': datetime.now().isoformat()
+                    }
+                
+                save_milestone_model(checkpoint_data, curr_episode, recent_performance)
+
+            # 성능 그래프 업데이트 (500회마다)
+            if curr_episode % 500 == 0 and len(performance_history['episodes']) > 1:
+                plot_performance_metrics(performance_history, curr_episode)
+                
+                # 성능 기록을 JSON 파일로 저장
+                with open(f'{performance_path}/performance_history.json', 'w') as f:
+                    json.dump(performance_history, f, indent=4)
+
+            # save the model (기존 32회마다 저장)
             if curr_episode % 32 == 0:
                 print('Saving model', end='\n')
                 checkpoint = {"policy_model": global_policy_net.state_dict(),
